@@ -3,10 +3,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <memory.h>
+#include <time.h>
 #define Ch(e, f, g)  (e & f) ^ ((~e) & g)
 #define Maj(a, b, c) (a & b) ^ (a & c) ^ (b & c)
 #define SYSTEM_ID 0xC1C7E00
 #define MAX_TRANSACTION_AMOUNT 200000000 // can be modified later
+#define MAKE_VERSION(a, b, c) (a << 16) | (b << 8) | c
 
 struct transaction
 {
@@ -14,7 +16,10 @@ struct transaction
     uint32_t nonce;
     uint32_t amount;
     uint64_t id;
+    uint8_t* data;
 };
+
+double block_reward = 12.0f;
 
 static uint32_t crypto_rand()
 {
@@ -27,6 +32,19 @@ struct ledger
     size_t size, cap;
 } local_ledger;
 uint64_t last_generated_id;
+
+struct merkle
+{
+    size_t size;
+    struct transaction t[];
+};
+
+size_t generate_id()
+{
+    uint64_t id = rand() + last_generated_id++;
+    last_generated_id = id;
+    return id;
+}
 
 struct transaction* init_transaction(uint64_t from, uint64_t to, uint32_t amount)
 {
@@ -60,13 +78,23 @@ int valid_transaction(struct transaction* t)
     return 0;
 }
 
+struct block_header { 
+        uint32_t version;
+        uint32_t prev_sha[8];
+        uint32_t merkle[8]; 
+        uint32_t nonce;
+        uint64_t timestamp;
+        uint32_t difficulty;
+};
+
 struct block
 {
-    uint8_t* data;
-    uint32_t sha[8], prev_sha[8];
-    uint32_t size; // idk what is this 
-    uint32_t last; // initially set to 0, represents the chunks that were hashed
-    double reward; // the reward, when halving block->reward /= 2 
+    uint32_t sha[8];
+    struct block_header header;
+    struct {
+        size_t size;
+        struct transaction t[];
+    } data;
 };
 
 uint32_t hashes[9] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
@@ -129,21 +157,31 @@ void sha256(uint8_t* input, size_t size, uint32_t* output)
     free(W);
 }
 
-uint8_t* grab_64b(struct block* b)
+int try_mine_block(struct block* b, uint32_t max_sha[8])
 {
-    b->last += 64;
-    return &b->data[b->last - 64];
+    uint32_t data[8];
+    b->header.nonce++;
+    sha256((uint8_t*)&b->header, sizeof(b->header), data);
+    return (memcmp(data, max_sha, 32) < 0);
 }
 
-void hash_64b(struct block* b, uint32_t out[8])
+int mine_block(struct block* b, uint32_t max_sha[8]) 
 {
-    uint8_t* data = grab_64b(b);
-    sha256(data, 64, out);
+    uint32_t data[8];
+    do {
+        b->header.nonce++;
+        sha256((uint8_t*)&b->header, sizeof(b->header), data);
+    } while (memcmp(data, max_sha, 32) >= 0);
+    
+    memcpy(b->sha, data, 32);
+    return 1;
 }
 
-void hash_block(struct block* b)
+int validate_sha(struct block* b)
 {
-    sha256(b->data, b->size, b->sha);
+    uint32_t data[8];
+    sha256((uint8_t*)&b->header, sizeof(b->header), data);
+    return memcmp(b->sha, data, 32);
 }
 
 int hash_and_compare(char* str1, uint32_t hash[8])
@@ -153,23 +191,13 @@ int hash_and_compare(char* str1, uint32_t hash[8])
     return (memcmp(hash, hash2, 8) == 0);
 }
 
-struct block* init_block_str(char* str) // with a message, not binary data
+struct block* init_block(size_t no_tr) // with a message, not binary data
 {
-    struct block* b = malloc(sizeof(struct block));
-    b->data = str;
-    b->size = strlen(str);
-    b->reward = 0; // to be set by the SYSTEM
-    b->last = 0;
-    return b;
-}
-
-int release_block(struct block* b)
-{
-    if(b->last != b->size) // if not finished
-        return -1;
-
-    b->reward = 0;
-    free(b);
+    struct block* b = malloc(sizeof(struct block) + no_tr * sizeof(struct transaction));
+    memset(b->sha, 0, 32);
+    b->header.nonce = 1;
+    b->header.timestamp = time(NULL);
+    b->header.version = MAKE_VERSION(1, 1, 0);
 }
 
 void free_block(struct block* b)
@@ -180,8 +208,11 @@ void free_block(struct block* b)
 void save_block(struct block* b, char* filename)
 {
     FILE* fp = fopen(filename, "w+");
-    fwrite(&b->last, sizeof(struct block) - sizeof(uint8_t*), 1, fp);
-    fwrite(b->data, b->size, 1, fp);
+    printf("%u %u %u", b->header.nonce, b->header.timestamp, b->header.difficulty);
+    for(int i = 0;i < b->data.size;i++)
+    {
+        fprintf(fp, "%u %u %u %ull", b->data.t[i].amount, b->data.t[i].to, b->data.t[i].from, b->data.t[i].id);
+    }
     fclose(fp);
 }
 
@@ -193,7 +224,7 @@ void print_block_hash(struct block* b)
 
 void reward_block(struct block* b, uint64_t user)
 {
-    struct transaction* t = init_transaction(SYSTEM_ID, user, b->reward);
+    struct transaction* t = init_transaction(SYSTEM_ID, user, block_reward);
     add_transaction(&local_ledger, t);
     free_block(b);
 }
@@ -223,16 +254,16 @@ struct blockchain create_chain(size_t num_blocks) {
 
 struct block* prev_block(struct blockchain chain, struct block* b)
 {
-    return find_block(chain, b->prev_sha);
+    return find_block(chain, b->header.prev_sha);
 }
 
 void add_block(struct blockchain* chain, struct block* b)
 {
     if(b == NULL || chain == NULL || chain->blocks == NULL) return;
     if(chain->cap > 0)
-        memcpy(b->prev_sha, chain->blocks[chain->cap - 1].sha, 8 * sizeof(uint32_t));
+        memcpy(b->header.prev_sha, chain->blocks[chain->cap - 1].sha, 8 * sizeof(uint32_t));
     else 
-        memset(b->prev_sha, 0, 8 * sizeof(uint32_t)); // sets it to 0
+        memset(b->header.prev_sha, 0, 8 * sizeof(uint32_t)); // sets it to 0
     memcpy(&chain->blocks[chain->cap], b, sizeof(struct block));
     chain->cap++;
 }
@@ -247,13 +278,6 @@ void free_chain()
 {
 
 }
-
-// TO BE CHANGED LATER!
-struct merkle
-{
-    size_t size;
-    struct transaction t[];
-};
 
 // Create a Merkle node from a ledger containing all transactions
 struct merkle* merkle_ledger(struct ledger* l, size_t start, size_t end) {
@@ -285,12 +309,48 @@ void merkle_root(struct merkle* m, uint32_t sha[8])
     sha256((uint8_t*)m->t, m->size * sizeof(struct transaction), sha);
 }
 
+void merkle_block(struct block* b)
+{
+    merkle_root(&b->data, b->header.merkle);
+}
+
+struct contract
+{
+    uint8_t* code; // best if bytecode
+    struct {
+        uint32_t address[8]; // sha of the block
+        void* other;
+    } data;
+};
+
+void deploy_contract(struct blockchain b, struct contract* c)
+{
+    struct block* cntb = &b.blocks[b.size];
+    memcpy(c->data.address, cntb, 8 * sizeof(uint32_t));
+}
+
+struct transaction* get_contract_transaction(struct block* b)
+{
+    for(int i = 0;i < b->data.size;i++)
+        if(b->data.t[i].data != NULL)
+            return &b->data.t[i];
+}
+
+/*
 int main()
 {
-    struct blockchain chain = create_chain(5);
-    add_block(&chain, init_block_str("Wow"));
-    add_block(&chain, init_block_str("It is"));
-    add_block(&chain, init_block_str("nice"));
-
+    struct block* b = init_block(2);
+    uint32_t max_sha[8] = {0x2540001, 0x987556f, 0x1234567, 0x7af0bd1, 0x1999324, 0x81aacd00, 0x9ff990};
+    b->data.t[0] =  (struct transaction){.amount = 0.1f, .from = SYSTEM_ID, .to = 0x1ff000};
+    b->data.t[1] =  (struct transaction){.amount = 0.05f, .from = SYSTEM_ID, .to = 0x1ea000};
+    mine_block(b, max_sha);
+    if(!validate_sha(b)) {
+        printf("Got wrong sha!");
+        print_block_hash(b);
+        exit(0);
+    }
+    print_block_hash(b);
+    printf("\nTries: %i", b->header.nonce);
     return 0;
 }
+*/
