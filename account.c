@@ -89,7 +89,61 @@ void ripemd160(uint8_t *input, size_t size, uint8_t out[20])
         free(data);
 }
 
-// TO DO: Generate Public Key
+// TO DO: Generate Public / Private Key
+// secp256k1 algorithm
+
+typedef struct {
+    uint32_t n[8];
+} __int256;
+
+__int256 P, Gx, Gy;
+
+int bigint_cmp(__int256 a, __int256 b) {
+    for (int i = 7; i >= 0; --i) {
+        if (a.n[i] > b.n[i]) return 1;
+        if (a.n[i] < b.n[i]) return 0;
+    }
+    return 1;
+}
+
+// Function to subtract two 256-bit integers: res = a - b
+void bigint_sub(__int256 a, __int256 b, __int256 *res) {
+    uint64_t borrow = 0;
+    for (int i = 0; i < 8; i++) {
+        uint64_t diff = (uint64_t)a.n[i] - b.n[i] - borrow;
+        res->n[i] = (uint32_t)diff;
+        borrow = (diff >> 32) & 1;
+    }
+}
+
+// Function to compute a mod b
+void bigint_mod(__int256 a, __int256 b, __int256 *res) {
+    *res = a; // Copy a to res
+
+    while (bigint_cmp(*res, b)) {
+        bigint_sub(*res, b, res);
+    }
+}
+
+void setup_elliptic()
+{
+    for(int i = 0;i < 7;i++)
+        P.n[i] = 0xFFFFFFFF;
+    
+    P.n[6]--;
+    P.n[7] = 0xFFFFFC2F;
+
+    uint32_t _Gx[8] = { 0x79BE667E, 0xF9DCBBAC, 0x55A06295, 0xCE870B07, 
+                    0x029BFCDB, 0x2DCE28D9, 0x59F2815B, 0x16F81798 };
+
+    memcpy(&Gx.n, _Gx, sizeof(uint32_t) * 8);
+
+    uint32_t _Gy[8] = { 0x483ADA77, 0x26A3C465, 0x5DA4FBFC, 0x0E1108A8, 
+                    0xFD17B448, 0xA6855419, 0x9C47D08F, 0xFB10D4B8 };
+
+    memcpy(&Gy.n, _Gy, sizeof(uint32_t) * 8);
+}
+
 void generate_pkey()
 {
     uint8_t data[65];

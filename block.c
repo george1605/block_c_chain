@@ -279,10 +279,12 @@ void free_chain()
 
 }
 
-// Create a Merkle node from a ledger containing all transactions
 struct merkle* merkle_ledger(struct ledger* l, size_t start, size_t end) {
-    if (start > end || start >= l->size) return NULL;
-    if (end >= l->size) end = l->size - 1; // Ensure 'end' does not exceed ledger size
+    if (start > end || start >= l->size) 
+        return NULL;
+        
+    if (end >= l->size) 
+        end = l->size - 1; 
 
     size_t num_transactions = end - start + 1;
     struct merkle* m = malloc(sizeof(struct merkle) + num_transactions * sizeof(struct transaction));
@@ -299,7 +301,7 @@ struct merkle* merkle_ledger(struct ledger* l, size_t start, size_t end) {
 int merkle_add(struct merkle* m, struct transaction t)
 {
     if(m == NULL) return -1;
-    if(!valid_transaction(&t)) return -1; // cannot add invalid transactions here
+    if(!valid_transaction(&t)) return -1;
     m->t[m->size++] = t;
     return 0;
 }
