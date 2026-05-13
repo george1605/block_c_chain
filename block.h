@@ -3,12 +3,17 @@
 #include <stdio.h>
 #include <string.h>
 #include <memory.h>
+#include <assert.h>
 #include <time.h>
 #define Ch(e, f, g)  (e & f) ^ ((~e) & g)
 #define Maj(a, b, c) (a & b) ^ (a & c) ^ (b & c)
 #define SYSTEM_ID 0xC1C7E00
 #define MAX_TRANSACTION_AMOUNT 200000000 // can be modified later
 #define MAKE_VERSION(a, b, c) (a << 16) | (b << 8) | c
+
+// Error Codes for SHA256
+#define SHA256_SUCCESS 0
+#define SHA256_COULD_NOT_ALLOCATE_MEMORY -1
 
 struct transaction
 {
@@ -21,14 +26,28 @@ struct transaction
 
 double block_reward = 12.0f;
 
+typedef struct { uint64_t state;  uint64_t inc; } pcg32_random_t; // using the PCG 32 from https://www.pcg-random.org/
+pcg32_random_t* rng;
+
 static uint32_t crypto_rand()
 {
-    return 0U;
+    uint64_t oldstate = rng->state;
+    rng->state = oldstate * 6364136223846793005ULL + (rng->inc|1);
+    uint32_t xorshifted = ((oldstate >> 18u) ^ oldstate) >> 27u;
+    uint32_t rot = oldstate >> 59u;
+    return (xorshifted >> rot) | (xorshifted << ((-rot) & 31));
+}
+
+void crypto_setup()
+{
+    rng = (pcg32_random_t*)malloc(sizeof(pcg32_random_t));
+    rng->state = (uint64_t)time(NULL) ^ (uintptr_t)&rng;
+    rng->inc = (uint64_t)time(NULL) ^ (uintptr_t)&rng;
 }
 
 struct ledger
 {
-    struct transactions** list;
+    struct transaction** list;
     size_t size, cap;
 } local_ledger;
 uint64_t last_generated_id;
@@ -48,7 +67,9 @@ size_t generate_id()
 
 struct transaction* init_transaction(uint64_t from, uint64_t to, uint32_t amount)
 {
-    struct transaction* t = malloc(sizeof(struct transaction));
+    struct transaction* t = (struct transaction*)malloc(sizeof(struct transaction));
+    if(t == NULL) return NULL;
+
     if(from == 0) t->from = SYSTEM_ID;
     else t->from = from;
     t->nonce = crypto_rand(); // to be replaced
@@ -61,7 +82,12 @@ struct transaction* init_transaction(uint64_t from, uint64_t to, uint32_t amount
 void add_transaction(struct ledger* ledger, struct transaction* t)
 {
     if(ledger->size + 1 == ledger->cap) {
-        ledger->list = realloc(ledger->list, sizeof(struct ledger*) * (ledger->cap + 10));
+        void* original = (void*)ledger->list;
+        ledger->list = (struct transaction**)realloc(ledger->list, sizeof(struct ledger*) * (ledger->cap + 10));
+        if(ledger->list == NULL) {
+            ledger->list = (struct transaction**)original; // restore original pointer on failure
+            return;
+        }
         ledger->cap += 10;
     }
     ledger->list[ledger->size++] = t;
@@ -113,22 +139,33 @@ uint32_t rightrotate(uint32_t x, int n) {
     return (x >> n) | (x << (32 - n));
 }
 
-void sha256(uint8_t* input, size_t size, uint32_t* output)
+int sha256(uint8_t* input, size_t size, uint32_t* output)
 {
+    assert(input != NULL && "Input cannot be NULL");
+    assert(output != NULL && "Output cannot be NULL");
+    assert(size > 0 && "Input size must be greater than 0");
+
     uint8_t* data = input;
     size_t sz = size, alloc = 0; // to know if memory was allocated
     if(size % 64 != 0)
     {
         // padding
         sz = size + 64 - (size % 64);
-        data = malloc(size + 64 - (size % 64));
+        data = (uint8_t*)malloc(sz);
+        if(data == NULL) return SHA256_COULD_NOT_ALLOCATE_MEMORY;
+
         memcpy(data, input, size);
-        data[size + 1] = 1;
+        data[size + 1] = 0x80;
         memset(&data[size], 0, sz - size - 1);
         alloc = 1;
     }
 
-    uint32_t* W = realloc(data, 64 * 32);
+    uint32_t* W = (uint32_t*)realloc(data, 64 * 32);
+    if(W == NULL) {
+        if(alloc) free(data);
+        return SHA256_COULD_NOT_ALLOCATE_MEMORY;
+    }
+
     uint32_t s0, s1, v[8];
     int t;
     for(t = 16;t < 63;t++)
@@ -153,8 +190,15 @@ void sha256(uint8_t* input, size_t size, uint32_t* output)
         output[i] = hashes[i];
     }
 
-    if(alloc) free(data);
+    if(alloc) {
+        memset(data, 0, sz); 
+        free(data);
+    }
+    
     free(W);
+
+    W = NULL;
+    data = NULL;
 }
 
 int try_mine_block(struct block* b, uint32_t max_sha[8])
@@ -170,7 +214,16 @@ int mine_block(struct block* b, uint32_t max_sha[8])
     uint32_t data[8];
     do {
         b->header.nonce++;
-        sha256((uint8_t*)&b->header, sizeof(b->header), data);
+        if(sha256((uint8_t*)&b->header, sizeof(b->header), data) == SHA256_COULD_NOT_ALLOCATE_MEMORY) {
+            fprintf(stderr, "Error: Could not allocate memory for SHA256 computation.\n");
+            return -1; // Indicate failure due to memory allocation
+        }
+
+        if(sha256((uint8_t*)data, 32, data) == SHA256_COULD_NOT_ALLOCATE_MEMORY) {
+            fprintf(stderr, "Error: Could not allocate memory for SHA256 computation.\n");
+            return -1; // Indicate failure due to memory allocation
+        }
+
     } while (memcmp(data, max_sha, 32) >= 0);
     
     memcpy(b->sha, data, 32);
@@ -181,23 +234,39 @@ int validate_sha(struct block* b)
 {
     uint32_t data[8];
     sha256((uint8_t*)&b->header, sizeof(b->header), data);
+    sha256((uint8_t*)data, 32, data);
     return memcmp(b->sha, data, 32);
 }
 
 int hash_and_compare(char* str1, uint32_t hash[8])
 {
     uint32_t hash2[8];
-    sha256(str1, strlen(str1), hash2);
+    sha256((uint8_t*)str1, strlen(str1), hash2);
+    sha256((uint8_t*)hash2, 32, hash2);
     return (memcmp(hash, hash2, 8) == 0);
+}
+
+void bits_to_target(uint32_t bits, uint8_t target[32]) {
+    memset(target, 0, 32);
+
+    uint32_t exponent = bits >> 24;
+    uint32_t mantissa = bits & 0xFFFFFF;
+
+    int idx = 32 - exponent;
+
+    target[idx]     = (mantissa >> 16) & 0xFF;
+    target[idx + 1] = (mantissa >> 8) & 0xFF;
+    target[idx + 2] = mantissa & 0xFF;
 }
 
 struct block* init_block(size_t no_tr) // with a message, not binary data
 {
-    struct block* b = malloc(sizeof(struct block) + no_tr * sizeof(struct transaction));
+    struct block* b = (struct block*)malloc(sizeof(struct block) + no_tr * sizeof(struct transaction));
     memset(b->sha, 0, 32);
     b->header.nonce = 1;
     b->header.timestamp = time(NULL);
     b->header.version = MAKE_VERSION(1, 1, 0);
+    b->header.difficulty = 0x1d00ffff; // to be modified later
 }
 
 void free_block(struct block* b)
@@ -220,6 +289,12 @@ void print_block_hash(struct block* b)
 {
     for(int i = 0;i < 8;i++)
         printf("%08x", b->sha[i]);
+}
+
+void print_hash(uint32_t hash[8], char sep)
+{
+    for(int i = 0;i < 8;i++)
+        printf("%08x%c", hash[i], sep);
 }
 
 void reward_block(struct block* b, uint64_t user)
@@ -246,7 +321,7 @@ struct block* find_block(struct blockchain blockchain, uint32_t target_sha[8]) {
 
 struct blockchain create_chain(size_t num_blocks) {
     struct blockchain b;
-    b.blocks = malloc(sizeof(struct block) * num_blocks);
+    b.blocks = (struct block*)malloc(sizeof(struct block) * num_blocks);
     b.size = num_blocks;
     b.cap = 0;
     return b;
@@ -287,7 +362,7 @@ struct merkle* merkle_ledger(struct ledger* l, size_t start, size_t end) {
         end = l->size - 1; 
 
     size_t num_transactions = end - start + 1;
-    struct merkle* m = malloc(sizeof(struct merkle) + num_transactions * sizeof(struct transaction));
+    struct merkle* m = (struct merkle*)malloc(sizeof(struct merkle) + num_transactions * sizeof(struct transaction));
     if (!m) return NULL;
 
     m->size = num_transactions;
@@ -306,14 +381,52 @@ int merkle_add(struct merkle* m, struct transaction t)
     return 0;
 }
 
-void merkle_root(struct merkle* m, uint32_t sha[8])
+#define MAX_TX 128 // maximum number of transactions in a block, can be modified laters
+
+void merkle_root(struct merkle* m, uint32_t root[8])
 {
-    sha256((uint8_t*)m->t, m->size * sizeof(struct transaction), sha);
+    uint32_t current[MAX_TX][8];
+    uint32_t next[MAX_TX][8];
+
+    size_t n = m->size;
+
+    for (size_t i = 0; i < n; i++) {
+        sha256((uint8_t*)&m->t[i], sizeof(struct transaction), current[i]);
+        sha256((uint8_t*)current[i], 32, current[i]);
+    }
+
+    while (n > 1) {
+
+        if (n % 2 != 0) {
+            memcpy(current[n], current[n - 1], 32);
+            n++;
+        }
+
+        size_t j = 0;
+
+        for (size_t i = 0; i < n; i += 2) {
+
+            uint32_t concat[16];
+
+            memcpy(concat,     current[i],     32);
+            memcpy(concat + 8, current[i + 1], 32);
+
+            sha256((uint8_t*)concat, 64, next[j]);
+            sha256((uint8_t*)next[j], 32, next[j]);
+
+            j++;
+        }
+
+        memcpy(current, next, j * 32);
+        n = j;
+    }
+
+    memcpy(root, current[0], 32);
 }
 
 void merkle_block(struct block* b)
 {
-    merkle_root(&b->data, b->header.merkle);
+    merkle_root((struct merkle*)&b->data, b->header.merkle);
 }
 
 struct contract
@@ -337,22 +450,3 @@ struct transaction* get_contract_transaction(struct block* b)
         if(b->data.t[i].data != NULL)
             return &b->data.t[i];
 }
-
-/*
-int main()
-{
-    struct block* b = init_block(2);
-    uint32_t max_sha[8] = {0x2540001, 0x987556f, 0x1234567, 0x7af0bd1, 0x1999324, 0x81aacd00, 0x9ff990};
-    b->data.t[0] =  (struct transaction){.amount = 0.1f, .from = SYSTEM_ID, .to = 0x1ff000};
-    b->data.t[1] =  (struct transaction){.amount = 0.05f, .from = SYSTEM_ID, .to = 0x1ea000};
-    mine_block(b, max_sha);
-    if(!validate_sha(b)) {
-        printf("Got wrong sha!");
-        print_block_hash(b);
-        exit(0);
-    }
-    print_block_hash(b);
-    printf("\nTries: %i", b->header.nonce);
-    return 0;
-}
-*/

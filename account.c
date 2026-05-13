@@ -1,5 +1,4 @@
-// this is preposterous, I want to speak with the manager
-#include "block.c"
+#include "block.h"
 #define F(B, C, D, E) B ^ C ^ D ^ E
 #define G(B, C, D, E) ((B & C) | (~B & D) | (C & E))
 #define H(B, C, D) (B | ~C) ^ D
@@ -11,7 +10,7 @@
 struct account
 {
     char *name;
-    uint8_t *priv_key, *pub_key;
+    uint8_t *priv_key, *pub_key, *address;
     double balance;
 };
 
@@ -144,13 +143,12 @@ void setup_elliptic()
     memcpy(&Gy.n, _Gy, sizeof(uint32_t) * 8);
 }
 
-void generate_pkey()
+void generate_pkey(uint8_t* data)
 {
-    uint8_t data[65];
     data[0] = 0x04;
 }
 
-void generate_addr(uint8_t* public_key, uint8_t* result)
+void generate_addr(uint8_t* public_key, int network, uint8_t* result)
 {
     uint32_t data[8], data2[8];
     uint8_t out[21], out2[21];
@@ -158,7 +156,7 @@ void generate_addr(uint8_t* public_key, uint8_t* result)
     sha256(public_key, 65, data);
     ripemd160((uint8_t*)data, 32, out + 1);
 
-    out[0] = MAINNET_VERSION; // append version
+    out[0] = network; // append version
 
     sha256(data, 21, data2);
     memset(out, 0, 32);
@@ -166,4 +164,21 @@ void generate_addr(uint8_t* public_key, uint8_t* result)
 
     memcpy(result, out, 21);
     memcpy(result + 21, out2, 4);
+}
+
+void generate_privkey(uint8_t* out)
+{
+    // smth here
+}
+
+void init_account(struct account* acc, int network)
+{
+    acc->balance = 0.0; // 0 coins
+    acc->name = "user----";
+    acc->pub_key = malloc(65);
+    acc->priv_key = malloc(32);
+    acc->address = malloc(25);
+    generate_privkey(acc->priv_key);
+    generate_pkey(acc->pub_key);
+    generate_addr(acc->pub_key, network, acc->address);
 }
