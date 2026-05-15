@@ -25,6 +25,17 @@ typedef struct {
     uint256_t storage[1024]; // persistent key-value storage (simplified)
 } EVM;
 
+void stack_dump(EVM* evm) {
+    printf("Stack (top to bottom):\n");
+    for (int i = evm->sp - 1; i >= 0; i--) {
+        printf("  [%d]: ", i);
+        for (int j = 0; j < 32; j++) {
+            printf("%02x", evm->stack[i][j]);
+        }
+        printf("\n");
+    }
+}
+
 void execute_bytecode(EVM* evm)
 {
     int result = 0, i = 0;
@@ -35,8 +46,17 @@ void execute_bytecode(EVM* evm)
     {
         switch(code[i])
         {
+        case 0x00: // STOP
+            goto end_func;
         case 0x60: // PUSH1
             evm->stack[evm->sp / 32][evm->sp % 32] = code[++i]; // Push next byte onto stack
+            evm->sp += 1;
+            break;
+        case 0x50: // POP 
+            evm->sp -= 1;
+            break;
+        case 0x80: // DUP1
+            memcpy(evm->stack[(evm->sp) / 32], evm->stack[(evm->sp - 1) / 32], 1); // Duplicate top of stack
             evm->sp += 1;
             break;
         case 0x54:
@@ -52,19 +72,40 @@ void execute_bytecode(EVM* evm)
         i++;
         evm->pc++;
     }
+
+end_func:
+    stack_dump(evm);
+}
+
+// Execute the transactions in a block (contracts)
+void execute_trans_block(struct block* b)
+{
+    for(int i = 0; i < b->data.size; i++) {
+        if(b->data.t[i].to == NULL) 
+        {
+            EVM evm;
+            memset(&evm, 0, sizeof(EVM));
+            evm.code = (uint8_t*)b->data.t[i].data;
+            evm.code_size = b->data.t[i].amount;
+            execute_bytecode(&evm);
+        }
+    }
 }
 
 int main()
 {
-    EVM evm;
-    memset(&evm, 0, sizeof(EVM));
+    struct block b;
+    uint8_t bytecode[] = {0x60, 0x02, 0x60, 0x07, 0x01};
 
-    // Example bytecode: PUSH1 0x2 PUSH1 0x3 ADD
-    uint8_t bytecode[] = {0x60, 0x02, 0x60, 0x03, 0x01};
-    evm.code = bytecode;
-    evm.code_size = sizeof(bytecode);
+    b.data.t = (struct transaction*)malloc(sizeof(struct transaction) * 1);
+    b.data.size = 1;
 
-    execute_bytecode(&evm);
-    printf("Result on stack: %d\n", evm.stack[(evm.sp - 1) / 32][(evm.sp - 1) % 32]); // Should print 5
+    b.data.t[0].to = NULL; // Indicating this is a contract deployment
+    b.data.t[0].data = bytecode;
+    b.data.t[0].amount = sizeof(bytecode); 
+
+    execute_trans_block(&b);
+
+    free(b.data.t);
     return 0;
 }

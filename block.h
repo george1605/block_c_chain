@@ -119,7 +119,7 @@ struct block
     struct block_header header;
     struct {
         size_t size;
-        struct transaction t[];
+        struct transaction* t;
     } data;
 };
 
@@ -145,7 +145,7 @@ int sha256(uint8_t* input, size_t size, uint32_t* output)
     assert(output != NULL && "Output cannot be NULL");
     assert(size > 0 && "Input size must be greater than 0");
 
-    uint8_t* data = input;
+    uint8_t* data = NULL;
     size_t sz = size, alloc = 0; // to know if memory was allocated
     if(size % 64 != 0)
     {
