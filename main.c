@@ -1,5 +1,6 @@
 #include "block.h"
 
+
 int main()
 {
     crypto_setup();

@@ -6,8 +6,9 @@
             "command": "C:\\MinGW\\bin\\gcc.exe",
             "args": [
                 "-fdiagnostics-color=always",
-                "-g",
-                "${file}",
+                "${workspaceFolder}\\main.c",
+                "${workspaceFolder}\\block.c",
+                "${workspaceFolder}\\serialize.c",
                 "-o",
                 "${fileDirname}\\${fileBasenameNoExtension}.exe"
             ],

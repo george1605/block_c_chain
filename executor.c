@@ -5,6 +5,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <assert.h>
+#include <math.h>
 #include "block.h"
 
 typedef uint8_t uint256_t[32]; // 256-bit unsigned integer
@@ -33,6 +34,24 @@ void stack_dump(EVM* evm) {
             printf("%02x", evm->stack[i][j]);
         }
         printf("\n");
+    }
+}
+
+uint64_t calculate_memory_cost(size_t a)
+{
+    return 3 * a + floor(a * a / 512);
+}
+
+uint64_t calculate_used_gas(EVM* evm)
+{
+    switch(evm->code[evm->pc]) {
+        case 0x00: return 0; // STOP
+        case 0x60: return 3; // PUSH1
+        case 0x50: return 2; // POP
+        case 0x80: return 3; // DUP1
+        case 0x54: return 200; // SLOAD
+        case 0x01: return 3; // ADD
+        default: return 0; // Default gas cost for unrecognized opcodes
     }
 }
 
@@ -69,12 +88,19 @@ void execute_bytecode(EVM* evm)
             evm->sp -= 1; // Pop two values
             break;
         }
+        
+        evm->gas -= calculate_used_gas(evm); // Deduct gas
+        if(evm->gas <= 0) {
+            fprintf(stderr, "Error: Out of gas\n");
+            goto end_func;
+        }
         i++;
         evm->pc++;
     }
 
 end_func:
     stack_dump(evm);
+    printf("Execution finished. Remaining gas: %lu\n", evm->gas);
 }
 
 // Execute the transactions in a block (contracts)
@@ -87,6 +113,7 @@ void execute_trans_block(struct block* b)
             memset(&evm, 0, sizeof(EVM));
             evm.code = (uint8_t*)b->data.t[i].data;
             evm.code_size = b->data.t[i].amount;
+            evm.gas = 21000; // Basic gas for contract deployment
             execute_bytecode(&evm);
         }
     }
